@@ -60,8 +60,9 @@ app.layout = html.Div([
         id="iss-map",
         style={
             "width": "100%",
-            "height": "700px"
-        }
+            "height": "700px",
+            "backgroundColor": "#020611"
+}
     ),
 
     dcc.Interval(
