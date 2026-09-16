@@ -1,13 +1,16 @@
 from math import radians, sin, cos, sqrt, atan2
 import requests
-import time
 from datetime import datetime
+
+from dash import Dash, html, dcc, Input, Output
 
 url = "http://api.open-notify.org/iss-now.json"
 
-# position data list relative to one below 
+# Position data list
 positions = []
 
+
+# Calculates distance between two points on Earth
 def calculate_distance(lat1, lon1, lat2, lon2):
     # Earth's approximate radius in kilometres
     R = 6371
@@ -25,8 +28,12 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
     return R * c
 
+
+# Gets the ISS position
 def get_iss_position():
-    response = requests.get(url)
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+
     data = response.json()
 
     latitude = float(data["iss_position"]["latitude"])
@@ -41,39 +48,79 @@ def get_iss_position():
         "time": time_now
     }
 
-while True:
+
+# Creates the Dash application
+app = Dash(__name__)
+
+
+# Page layout
+app.layout = html.Div([
+
+    html.Div(
+        id="iss-map",
+        style={
+            "width": "100%",
+            "height": "700px"
+        }
+    ),
+
+    dcc.Interval(
+        id="update-interval",
+        interval=5000,
+        n_intervals=0
+    ),
+
+    dcc.Store(
+        id="iss-position"
+    ),
+
+    html.Div(
+        id="map-update"
+    )
+])
+
+
+# Gets a new ISS position every 5 seconds
+@app.callback(
+    Output("iss-position", "data"),
+    Input("update-interval", "n_intervals")
+)
+def update_position(n):
+
     position = get_iss_position()
 
-    positions.append(position)
+    print("ISS:", position["latitude"], position["longitude"])
 
-    if len(positions) >= 2:
-        previous = positions[-2]
-        current = positions[-1]
+    return {
+        "latitude": position["latitude"],
+        "longitude": position["longitude"]
+    }
 
-        distance = calculate_distance(
-        previous["latitude"],
-        previous["longitude"],
-        current["latitude"],
-        current["longitude"]
-        )
 
-        time_elapsed = (
-        current["time"] - previous["time"]
-        ).total_seconds()
+# Sends the position from Python to the JavaScript map
+app.clientside_callback(
+    """
+    function(position) {
 
-        speed = distance / (time_elapsed / 3600)
+        if (!position || !window.issMarker) {
+            return "";
+        }
 
-        print("Speed:", round(speed, 2), "km/h")
+        window.issMarker.setLngLat([
+            position.longitude,
+            position.latitude
+        ]);
 
-    if len(positions) > 100:
-     positions.pop(0)
+        return "";
 
-    print("Time:", position["time"])
-    print("Latitude:", position["latitude"])
-    print("Longitude:", position["longitude"])
-    print("-  -  -")
-    print("Position:", position["latitude"], position["longitude"])
-    print("Points stored:", len(positions))
-    print("----------------")
+    }
+    """,
 
-    time.sleep(5)
+    Output("map-update", "children"),
+
+    Input("iss-position", "data")
+)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
