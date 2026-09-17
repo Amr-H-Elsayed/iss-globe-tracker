@@ -1,4 +1,7 @@
 import * as maplibregl from "https://unpkg.com/maplibre-gl@6.10.0/dist/maplibre-gl.mjs";
+import * as THREE from "https://esm.sh/three@0.180.0";
+import { GLTFLoader } from "https://esm.sh/three@0.180.0/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "https://esm.sh/three@0.180.0/examples/jsm/loaders/DRACOLoader.js";
 
 
 const style = {
@@ -16,20 +19,20 @@ const style = {
     },
 
     layers: [
-    {
-        id: "space-background",
-        type: "background",
-        paint: {
-            "background-color": "#020611"
-        }
-    },
+        {
+            id: "space-background",
+            type: "background",
+            paint: {
+                "background-color": "#020611"
+            }
+        },
 
-    {
-        id: "satellite",
-        type: "raster",
-        source: "satellite"
-    }
-]
+        {
+            id: "satellite",
+            type: "raster",
+            source: "satellite"
+        }
+    ]
 };
 
 
@@ -47,37 +50,39 @@ let animationStartTime = null;
 const animationDuration = 5000;
 
 
-// Real positions received from the API.
-const realTrail = [];
-
-
 // ==================================================
 // ORBIT SETTINGS
 // ==================================================
 
-const EARTH_RADIUS = 6371;
+const EARTH_RADIUS = 6371008.8;
 
-const EARTH_ROTATION_RATE =
-    7.2921159e-5;
+// Actual ISS altitude is ~400 km.
+// We exaggerate this visually so the orbit is
+// clearly separated from the globe.
+const VISUAL_ALTITUDE = 700000;
 
 
-// ISS orbital period.
-//
-// NASA gives approximately 90 minutes.
+// ISS orbital period ≈ 90 minutes.
 const ORBITAL_PERIOD = 90 * 60;
 
-
-// Angular velocity of the ISS around Earth.
 const ORBITAL_RATE =
     (2 * Math.PI) / ORBITAL_PERIOD;
 
 
-// How much predicted orbit to display.
+// Display 45 minutes in either direction.
 const PREDICTION_MINUTES = 45;
 
-
-// Number of points used to draw the predicted path.
 const PREDICTION_POINTS = 270;
+
+
+// ==================================================
+// ORBIT STATE
+// ==================================================
+
+const realTrail = [];
+
+let orbitNormal = null;
+let orbitReference = null;
 
 
 // ==================================================
@@ -85,7 +90,6 @@ const PREDICTION_POINTS = 270;
 // ==================================================
 
 function vectorAdd(a, b) {
-
     return [
         a[0] + b[0],
         a[1] + b[1],
@@ -95,7 +99,6 @@ function vectorAdd(a, b) {
 
 
 function vectorSubtract(a, b) {
-
     return [
         a[0] - b[0],
         a[1] - b[1],
@@ -105,7 +108,6 @@ function vectorSubtract(a, b) {
 
 
 function vectorMultiply(a, scalar) {
-
     return [
         a[0] * scalar,
         a[1] * scalar,
@@ -115,19 +117,15 @@ function vectorMultiply(a, scalar) {
 
 
 function crossProduct(a, b) {
-
     return [
         a[1] * b[2] - a[2] * b[1],
-
         a[2] * b[0] - a[0] * b[2],
-
         a[0] * b[1] - a[1] * b[0]
     ];
 }
 
 
 function vectorLength(v) {
-
     return Math.sqrt(
         v[0] ** 2 +
         v[1] ** 2 +
@@ -137,7 +135,6 @@ function vectorLength(v) {
 
 
 function normalize(v) {
-
     const length = vectorLength(v);
 
     if (length === 0) {
@@ -153,13 +150,16 @@ function normalize(v) {
 
 
 // ==================================================
-// COORDINATE CONVERSION
+// LAT/LON → UNIT VECTOR
 // ==================================================
 
 function latLonToVector(latitude, longitude) {
 
-    const lat = latitude * Math.PI / 180;
-    const lon = longitude * Math.PI / 180;
+    const lat =
+        latitude * Math.PI / 180;
+
+    const lon =
+        longitude * Math.PI / 180;
 
     return [
         Math.cos(lat) * Math.cos(lon),
@@ -169,15 +169,21 @@ function latLonToVector(latitude, longitude) {
 }
 
 
+// ==================================================
+// UNIT VECTOR → LAT/LON
+// ==================================================
+
 function vectorToLatLon(vector) {
 
     const v = normalize(vector);
 
     const latitude =
-        Math.asin(v[2]) * 180 / Math.PI;
+        Math.asin(v[2]) *
+        180 / Math.PI;
 
     const longitude =
-        Math.atan2(v[1], v[0]) * 180 / Math.PI;
+        Math.atan2(v[1], v[0]) *
+        180 / Math.PI;
 
     return [
         longitude,
@@ -187,26 +193,13 @@ function vectorToLatLon(vector) {
 
 
 // ==================================================
-// LONGITUDE HANDLING
+// LONGITUDE
 // ==================================================
-
-function normalizeLongitude(longitude) {
-
-    while (longitude > 180) {
-        longitude -= 360;
-    }
-
-    while (longitude < -180) {
-        longitude += 360;
-    }
-
-    return longitude;
-}
-
 
 function shortestLongitudeDifference(from, to) {
 
-    let difference = to - from;
+    let difference =
+        to - from;
 
     if (difference > 180) {
         difference -= 360;
@@ -221,10 +214,14 @@ function shortestLongitudeDifference(from, to) {
 
 
 // ==================================================
-// ISS SMOOTH MOVEMENT
+// SMOOTH ISS MOVEMENT
 // ==================================================
 
-function interpolatePosition(from, to, progress) {
+function interpolatePosition(
+    from,
+    to,
+    progress
+) {
 
     const longitudeDifference =
         shortestLongitudeDifference(
@@ -233,57 +230,36 @@ function interpolatePosition(from, to, progress) {
         );
 
     return [
-
         from[0] +
         longitudeDifference * progress,
 
         from[1] +
-        (to[1] - from[1]) * progress
+        (to[1] - from[1]) *
+        progress
     ];
-}
-
-
-function updateISSPosition(coordinates) {
-
-    if (!window.issMap) {
-        return;
-    }
-
-    const source =
-        window.issMap.getSource("iss");
-
-    if (!source) {
-        return;
-    }
-
-    source.setData({
-
-        type: "Feature",
-
-        geometry: {
-            type: "Point",
-            coordinates: coordinates
-        }
-    });
 }
 
 
 function animateISS(timestamp) {
 
-    if (!previousPosition || !targetPosition) {
+    if (
+        !previousPosition ||
+        !targetPosition
+    ) {
         return;
     }
 
     if (!animationStartTime) {
-        animationStartTime = timestamp;
+        animationStartTime =
+            timestamp;
     }
 
     let progress =
         (timestamp - animationStartTime)
         / animationDuration;
 
-    progress = Math.min(progress, 1);
-
+    progress =
+        Math.min(progress, 1);
 
     const currentPosition =
         interpolatePosition(
@@ -292,9 +268,7 @@ function animateISS(timestamp) {
             progress
         );
 
-
-    updateISSPosition(currentPosition);
-
+    update3DObjects(currentPosition);
 
     if (progress < 1) {
 
@@ -307,7 +281,8 @@ function animateISS(timestamp) {
         previousPosition =
             targetPosition;
 
-        animationStartTime = null;
+        animationStartTime =
+            null;
     }
 }
 
@@ -316,28 +291,21 @@ function animateISS(timestamp) {
 // ORBIT MODEL
 // ==================================================
 
-let orbitNormal = null;
-let orbitReference = null;
-
-
-// Build an approximate orbital plane from
-// two real ISS positions.
-//
-// We estimate velocity from the change in
-// position between API samples.
 function updateOrbitModel() {
 
     if (realTrail.length < 2) {
         return;
     }
 
-
     const current =
-        realTrail[realTrail.length - 1];
+        realTrail[
+            realTrail.length - 1
+        ];
 
     const previous =
-        realTrail[realTrail.length - 2];
-
+        realTrail[
+            realTrail.length - 2
+        ];
 
     const currentVector =
         latLonToVector(
@@ -345,47 +313,38 @@ function updateOrbitModel() {
             current[0]
         );
 
-
     const previousVector =
         latLonToVector(
             previous[1],
             previous[0]
         );
 
-
-    // Ground-fixed movement vector.
     const movement =
         vectorSubtract(
             currentVector,
             previousVector
         );
 
-
-    if (vectorLength(movement) === 0) {
+    if (
+        vectorLength(movement) === 0
+    ) {
         return;
     }
 
-
-    // Approximate orbital-plane normal.
-    //
-    // This is a simplified model, but over
-    // tens of minutes it gives us a useful
-    // orbital-shaped prediction.
     const normal =
         crossProduct(
             currentVector,
             movement
         );
 
-
-    if (vectorLength(normal) === 0) {
+    if (
+        vectorLength(normal) === 0
+    ) {
         return;
     }
 
-
     orbitNormal =
         normalize(normal);
-
 
     orbitReference =
         normalize(currentVector);
@@ -393,10 +352,14 @@ function updateOrbitModel() {
 
 
 // ==================================================
-// ROTATE A VECTOR AROUND AN AXIS
+// ROTATE VECTOR AROUND AXIS
 // ==================================================
 
-function rotateAroundAxis(vector, axis, angle) {
+function rotateAroundAxis(
+    vector,
+    axis,
+    angle
+) {
 
     const cosAngle =
         Math.cos(angle);
@@ -404,13 +367,11 @@ function rotateAroundAxis(vector, axis, angle) {
     const sinAngle =
         Math.sin(angle);
 
-
     const term1 =
         vectorMultiply(
             vector,
             cosAngle
         );
-
 
     const term2 =
         vectorMultiply(
@@ -421,12 +382,10 @@ function rotateAroundAxis(vector, axis, angle) {
             sinAngle
         );
 
-
     const axisDotVector =
         axis[0] * vector[0] +
         axis[1] * vector[1] +
         axis[2] * vector[2];
-
 
     const term3 =
         vectorMultiply(
@@ -434,7 +393,6 @@ function rotateAroundAxis(vector, axis, angle) {
             axisDotVector *
             (1 - cosAngle)
         );
-
 
     return normalize(
         vectorAdd(
@@ -449,33 +407,30 @@ function rotateAroundAxis(vector, axis, angle) {
 
 
 // ==================================================
-// PREDICT FUTURE/PREVIOUS ORBIT
+// PREDICT ORBIT
 // ==================================================
 
 function generatePredictedOrbit() {
 
-    if (!orbitNormal || !orbitReference) {
+    if (
+        !orbitNormal ||
+        !orbitReference
+    ) {
         return null;
     }
 
-
     const totalSeconds =
         PREDICTION_MINUTES * 60;
-
 
     const stepSeconds =
         totalSeconds /
         PREDICTION_POINTS;
 
-
     const past = [];
     const future = [];
 
 
-    // --------------------------------------------------
     // FUTURE
-    // --------------------------------------------------
-
     for (
         let i = 1;
         i <= PREDICTION_POINTS;
@@ -485,37 +440,21 @@ function generatePredictedOrbit() {
         const seconds =
             i * stepSeconds;
 
-
-        // Move around the orbital plane.
-        let inertialVector =
+        const position =
             rotateAroundAxis(
                 orbitReference,
                 orbitNormal,
-                ORBITAL_RATE * seconds
+                ORBITAL_RATE *
+                seconds
             );
-
-
-        // Compensate for Earth's rotation.
-        inertialVector =
-            rotateAroundAxis(
-                inertialVector,
-                [0, 0, 1],
-                -EARTH_ROTATION_RATE * seconds
-            );
-
 
         future.push(
-            vectorToLatLon(
-                inertialVector
-            )
+            vectorToLatLon(position)
         );
     }
 
 
-    // --------------------------------------------------
     // PAST
-    // --------------------------------------------------
-
     for (
         let i = PREDICTION_POINTS;
         i >= 1;
@@ -525,27 +464,16 @@ function generatePredictedOrbit() {
         const seconds =
             i * stepSeconds;
 
-
-        let inertialVector =
+        const position =
             rotateAroundAxis(
                 orbitReference,
                 orbitNormal,
-                -ORBITAL_RATE * seconds
+                -ORBITAL_RATE *
+                seconds
             );
-
-
-        inertialVector =
-            rotateAroundAxis(
-                inertialVector,
-                [0, 0, 1],
-                EARTH_ROTATION_RATE * seconds
-            );
-
 
         past.push(
-            vectorToLatLon(
-                inertialVector
-            )
+            vectorToLatLon(position)
         );
     }
 
@@ -558,7 +486,7 @@ function generatePredictedOrbit() {
 
 
 // ==================================================
-// SPLIT LINES AT THE INTERNATIONAL DATE LINE
+// SPLIT DATELINE
 // ==================================================
 
 function splitDateline(coordinates) {
@@ -568,24 +496,28 @@ function splitDateline(coordinates) {
     let currentSegment = [];
 
 
-    for (let i = 0; i < coordinates.length; i++) {
+    for (
+        let i = 0;
+        i < coordinates.length;
+        i++
+    ) {
 
-        const point = coordinates[i];
+        const point =
+            coordinates[i];
 
-
-        if (currentSegment.length === 0) {
+        if (
+            currentSegment.length === 0
+        ) {
 
             currentSegment.push(point);
 
             continue;
         }
 
-
         const previous =
             currentSegment[
                 currentSegment.length - 1
             ];
-
 
         const longitudeJump =
             Math.abs(
@@ -593,11 +525,14 @@ function splitDateline(coordinates) {
                 previous[0]
             );
 
-
         if (longitudeJump > 180) {
 
-            if (currentSegment.length > 1) {
-                segments.push(currentSegment);
+            if (
+                currentSegment.length > 1
+            ) {
+                segments.push(
+                    currentSegment
+                );
             }
 
             currentSegment = [point];
@@ -609,8 +544,12 @@ function splitDateline(coordinates) {
     }
 
 
-    if (currentSegment.length > 1) {
-        segments.push(currentSegment);
+    if (
+        currentSegment.length > 1
+    ) {
+        segments.push(
+            currentSegment
+        );
     }
 
 
@@ -619,116 +558,513 @@ function splitDateline(coordinates) {
 
 
 // ==================================================
-// UPDATE ORBIT TRAILS
+// 3D COORDINATES
+// ==================================================
+//
+// MapLibre's globe uses a sphere.
+// We convert longitude/latitude into
+// Earth-centered coordinates.
+//
+// VISUAL_ALTITUDE lifts the ISS away
+// from the globe.
+//
 // ==================================================
 
-function updateOrbitTrails() {
+function latLonTo3D(
+    longitude,
+    latitude,
+    altitude
+) {
 
-    if (!window.issMap) {
-        return;
-    }
+    const lat =
+        latitude *
+        Math.PI / 180;
 
+    const lon =
+        longitude *
+        Math.PI / 180;
 
-    const prediction =
-        generatePredictedOrbit();
+    const radius =
+        EARTH_RADIUS +
+        altitude;
 
+    return new THREE.Vector3(
 
-    if (!prediction) {
-        return;
-    }
+        Math.sin(lon) *
+        Math.cos(lat) *
+        radius,
 
+        Math.sin(lat) *
+        radius,
 
-    const pastSource =
-        window.issMap.getSource(
-            "iss-past"
-        );
-
-
-    const futureSource =
-        window.issMap.getSource(
-            "iss-future"
-        );
-
-
-    if (!pastSource || !futureSource) {
-        return;
-    }
-
-
-    const pastSegments =
-        splitDateline(
-            prediction.past
-        );
-
-
-    const futureSegments =
-        splitDateline(
-            prediction.future
-        );
-
-
-    pastSource.setData({
-
-        type: "FeatureCollection",
-
-        features:
-            pastSegments.map(
-                coordinates => ({
-
-                    type: "Feature",
-
-                    properties: {},
-
-                    geometry: {
-
-                        type: "LineString",
-
-                        coordinates
-                    }
-                })
-            )
-    });
-
-
-    futureSource.setData({
-
-        type: "FeatureCollection",
-
-        features:
-            futureSegments.map(
-                coordinates => ({
-
-                    type: "Feature",
-
-                    properties: {},
-
-                    geometry: {
-
-                        type: "LineString",
-
-                        coordinates
-                    }
-                })
-            )
-    });
+        Math.cos(lon) *
+        Math.cos(lat) *
+        radius
+    );
 }
 
 
 // ==================================================
-// RECEIVE REAL ISS POSITION
+// 3D SCENE
+// ==================================================
+
+let threeScene = null;
+let threeCamera = null;
+let threeRenderer = null;
+
+let issMesh = null;
+
+let pastLine = null;
+let futureLine = null;
+
+
+// ==================================================
+// CREATE 3D SPHERE
+// ==================================================
+
+function createISSMesh() {
+
+    const dracoLoader = new DRACOLoader();
+
+    dracoLoader.setDecoderPath(
+    "https://www.gstatic.com/draco/versioned/decoders/1.5.7/"
+    );
+
+    const gltfLoader = new GLTFLoader();
+    gltfLoader.setDRACOLoader(dracoLoader);
+
+    gltfLoader.load(
+        "/assets/ISS.glb",
+        (gltf) => {
+            issMesh = gltf.scene;
+
+            // Find the model's dimensions
+            const box = new THREE.Box3().setFromObject(issMesh);
+            const size = new THREE.Vector3();
+            box.getSize(size);
+
+         const maxDimension = Math.max(size.x, size.y, size.z);
+
+            // Visual size of the ISS in our exaggerated 3D world
+            const desiredSize = 1000000;
+
+            issMesh.scale.setScalar(desiredSize / maxDimension);
+
+            console.log("ISS scale:", issMesh.scale.x);
+            console.log("ISS position:", issMesh.position);
+            console.log("ISS dimensions:", size);
+
+            threeScene.add(issMesh);
+
+            console.log("ISS model loaded:", size);
+        },
+        undefined,
+        (error) => {
+         console.error("Failed to load ISS.glb:", error);
+        }
+    );
+}
+
+
+// ==================================================
+// CREATE ORBIT LINE
+// ==================================================
+
+function createOrbitLine(
+    color,
+    opacity,
+    dashed
+) {
+
+    const geometry =
+        new THREE.BufferGeometry();
+
+    const material =
+        dashed
+            ? new THREE.LineDashedMaterial({
+                color: color,
+                transparent: true,
+                opacity: opacity,
+                dashSize: 180000,
+                gapSize: 140000
+            })
+            : new THREE.LineBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: opacity
+            });
+
+    const line =
+        dashed
+            ? new THREE.LineSegments(
+                geometry,
+                material
+            )
+            : new THREE.Line(
+                geometry,
+                material
+            );
+
+    threeScene.add(line);
+
+    return line;
+}
+
+
+// ==================================================
+// UPDATE ISS 3D POSITION
+// ==================================================
+
+function updateISS3DPosition(
+    coordinates
+) {
+
+    if (!issMesh) {
+        return;
+    }
+
+    const position =
+        latLonTo3D(
+            coordinates[0],
+            coordinates[1],
+            VISUAL_ALTITUDE
+        );
+
+    issMesh.position.copy(
+        position
+    );
+}
+
+
+// ==================================================
+// UPDATE ORBIT LINE
+// ==================================================
+
+function updateOrbitLine(
+    line,
+    coordinates
+) {
+
+    if (!line) {
+        return;
+    }
+
+    const points = [];
+
+    for (
+        const coordinate of coordinates
+    ) {
+
+        points.push(
+            latLonTo3D(
+                coordinate[0],
+                coordinate[1],
+                VISUAL_ALTITUDE
+            )
+        );
+    }
+
+    const geometry =
+        line.geometry;
+
+    geometry.setFromPoints(
+        points
+    );
+
+    geometry.attributes.position.needsUpdate =
+        true;
+
+    geometry.computeBoundingSphere();
+
+    if (
+        line instanceof THREE.LineSegments
+    ) {
+        line.computeLineDistances();
+    }
+}
+
+
+// ==================================================
+// UPDATE ALL 3D OBJECTS
+// ==================================================
+
+function update3DObjects(
+    currentPosition
+) {
+
+    updateISS3DPosition(
+        currentPosition
+    );
+
+    if (
+        orbitNormal &&
+        orbitReference
+    ) {
+
+        const prediction =
+            generatePredictedOrbit();
+
+        if (prediction) {
+
+            updateOrbitLine(
+                pastLine,
+                prediction.past
+            );
+
+            updateOrbitLine(
+                futureLine,
+                prediction.future
+            );
+        }
+    }
+
+    if (window.issMap) {
+        window.issMap.triggerRepaint();
+    }
+}
+
+
+// ==================================================
+// MAP
+// ==================================================
+
+function createMap() {
+
+    const container =
+        document.getElementById(
+            "iss-map"
+        );
+
+    if (
+        !container ||
+        window.issMap
+    ) {
+        return;
+    }
+
+    container.style.backgroundColor =
+        "#020611";
+
+
+    const map =
+        new maplibregl.Map({
+
+            container: "iss-map",
+
+            style: style,
+
+            center: [30, 20],
+
+            zoom: 1,
+
+            canvasContextAttributes: {
+                antialias: true
+            }
+        });
+
+
+    map.on(
+        "style.load",
+        function () {
+
+            map.setProjection({
+                type: "globe"
+            });
+
+
+            window.issMap =
+                map;
+
+
+            // ==========================================
+            // THREE.JS
+            // ==========================================
+
+            threeCamera =
+                new THREE.Camera();
+
+            threeScene =
+                new THREE.Scene();
+
+
+            threeRenderer =
+                new THREE.WebGLRenderer({
+                    canvas:
+                        map.getCanvas(),
+
+                    context:
+                        map.painter.context.gl,
+
+                    antialias: true
+                });
+
+
+            threeRenderer.autoClear =
+                false;
+
+
+            // Lighting
+
+            const ambientLight =
+                new THREE.AmbientLight(
+                    0xffffff,
+                    1.4
+                );
+
+            threeScene.add(
+                ambientLight
+            );
+
+
+            const directionalLight =
+                new THREE.DirectionalLight(
+                    0xffffff,
+                    2.0
+                );
+
+            directionalLight.position.set(
+                5,
+                3,
+                5
+            );
+
+            threeScene.add(
+                directionalLight
+            );
+
+
+            // ==========================================
+            // ISS
+            // ==========================================
+
+            createISSMesh();
+
+
+            // ==========================================
+            // ORBIT
+            // ==========================================
+
+            pastLine =
+                createOrbitLine(
+                    0xff0000,
+                    0.55,
+                    false
+                );
+
+
+            futureLine =
+                createOrbitLine(
+                    0xffffff,
+                    0.60,
+                    true
+                );
+
+
+            // ==========================================
+            // CUSTOM MAPLIBRE 3D LAYER
+            // ==========================================
+
+            const customLayer = {
+
+                id: "iss-3d",
+
+                type: "custom",
+
+                renderingMode: "3d",
+
+
+                render(gl, args) {
+
+                    const projectionMatrix =
+                        new THREE.Matrix4()
+                            .fromArray(
+                                args
+                                    .defaultProjectionData
+                                    .mainMatrix
+                            );
+
+
+                    // Convert our Earth-centered
+                    // meter coordinates into the
+                    // unit sphere used by MapLibre.
+
+                    const scale =
+                        1 /
+                        EARTH_RADIUS;
+
+
+                    const worldMatrix =
+                        new THREE.Matrix4()
+                            .makeScale(
+                                scale,
+                                scale,
+                                scale
+                            );
+
+
+                    threeCamera
+                        .projectionMatrix =
+                            projectionMatrix
+                                .multiply(
+                                    worldMatrix
+                                );
+
+
+                    threeRenderer.resetState();
+
+                    threeRenderer.render(
+                        threeScene,
+                        threeCamera
+                    );
+
+
+                    map.triggerRepaint();
+                }
+            };
+
+
+            map.addLayer(
+                customLayer
+            );
+
+
+            // ==========================================
+            // INITIAL POSITION
+            // ==========================================
+
+            if (
+                window.latestISSPosition
+            ) {
+
+                update3DObjects(
+                    window.latestISSPosition
+                );
+            }
+
+
+            console.log(
+                "3D ISS layer ready"
+            );
+        }
+    );
+}
+
+
+// ==================================================
+// RECEIVE ISS POSITION
 // ==================================================
 
 window.issMarker = {
 
-    setLngLat: function (coordinates) {
+    setLngLat: function (
+        coordinates
+    ) {
 
         window.latestISSPosition =
             coordinates;
 
 
-        // ------------------------------------------
-        // FIRST POSITION
-        // ------------------------------------------
+        // First position
 
         if (!previousPosition) {
 
@@ -738,7 +1074,7 @@ window.issMarker = {
             targetPosition =
                 coordinates;
 
-            updateISSPosition(
+            update3DObjects(
                 coordinates
             );
 
@@ -750,33 +1086,33 @@ window.issMarker = {
         }
 
 
-        // ------------------------------------------
-        // ADD REAL POSITION
-        // ------------------------------------------
+        // Store real position
 
         realTrail.push(
             coordinates
         );
 
 
-        if (realTrail.length > 20) {
+        if (
+            realTrail.length > 20
+        ) {
             realTrail.shift();
         }
 
 
-        // ------------------------------------------
-        // UPDATE ORBIT MODEL
-        // ------------------------------------------
+        // Update orbital plane
 
         updateOrbitModel();
 
 
-        updateOrbitTrails();
+        // Update prediction
+
+        update3DObjects(
+            coordinates
+        );
 
 
-        // ------------------------------------------
-        // SMOOTH LIVE MARKER
-        // ------------------------------------------
+        // Smooth movement
 
         const longitudeDifference =
             shortestLongitudeDifference(
@@ -784,11 +1120,9 @@ window.issMarker = {
                 coordinates[0]
             );
 
-
         const latitudeDifference =
             coordinates[1] -
             previousPosition[1];
-
 
         const difference =
             Math.sqrt(
@@ -797,8 +1131,6 @@ window.issMarker = {
             );
 
 
-        // If something went seriously wrong,
-        // trust the real API position.
         if (difference > 2) {
 
             previousPosition =
@@ -810,7 +1142,7 @@ window.issMarker = {
             animationStartTime =
                 null;
 
-            updateISSPosition(
+            update3DObjects(
                 coordinates
             );
 
@@ -837,220 +1169,26 @@ window.issMarker = {
 
 
 // ==================================================
-// CREATE MAP
-// ==================================================
-
-function createMap() {
-    const container =
-        document.getElementById("iss-map");
-
-    if (!container || window.issMap) {
-        return;
-    }
-
-    container.style.backgroundColor = "#020611";
-
-    const map =
-        new maplibregl.Map({
-            container: "iss-map",
-            style: style,
-            center: [30, 20],
-            zoom: 1
-        });
-
-
-    map.on("style.load", function () {
-
-        map.setProjection({
-            type: "globe"
-        });
-
-
-        window.issMap =
-            map;
-
-
-        // ==================================================
-        // LIVE ISS
-        // ==================================================
-
-        map.addSource("iss", {
-
-            type: "geojson",
-
-            data: {
-
-                type: "Feature",
-
-                geometry: {
-
-                    type: "Point",
-
-                    coordinates: [0, 0]
-                }
-            }
-        });
-
-
-        // ==================================================
-        // PAST PREDICTION
-        // ==================================================
-
-        map.addSource("iss-past", {
-
-            type: "geojson",
-
-            data: {
-
-                type: "FeatureCollection",
-
-                features: []
-            }
-        });
-
-
-        // ==================================================
-        // FUTURE PREDICTION
-        // ==================================================
-
-        map.addSource("iss-future", {
-
-            type: "geojson",
-
-            data: {
-
-                type: "FeatureCollection",
-
-                features: []
-            }
-        });
-
-
-        // ==================================================
-        // PAST TRAIL
-        // ==================================================
-
-        map.addLayer({
-
-            id: "iss-past",
-
-            type: "line",
-
-            source: "iss-past",
-
-            layout: {
-
-                "line-cap": "round",
-
-                "line-join": "round"
-            },
-
-            paint: {
-
-                "line-color": "#ff0000",
-
-                "line-width": 3,
-
-                "line-opacity": 0.45
-            }
-        });
-
-
-        // ==================================================
-        // FUTURE TRAIL
-        // ==================================================
-
-        map.addLayer({
-
-            id: "iss-future",
-
-            type: "line",
-
-            source: "iss-future",
-
-            layout: {
-
-                "line-cap": "round",
-
-                "line-join": "round"
-            },
-
-            paint: {
-
-                "line-color": "#ffffff",
-
-                "line-width": 2,
-
-                "line-opacity": 0.55,
-
-                "line-dasharray": [
-                    2,
-                    3
-                ]
-            }
-        });
-
-
-        // ==================================================
-        // ISS MARKER
-        // ==================================================
-
-        map.addLayer({
-
-            id: "iss",
-
-            type: "circle",
-
-            source: "iss",
-
-            paint: {
-
-                "circle-radius": 9,
-
-                "circle-color": "#ff0000",
-
-                "circle-stroke-color": "#ffffff",
-
-                "circle-stroke-width": 3
-            }
-        });
-
-
-        // ==================================================
-        // APPLY POSITION RECEIVED BEFORE MAP LOAD
-        // ==================================================
-
-        if (window.latestISSPosition) {
-
-            window.issMarker.setLngLat(
-                window.latestISSPosition
-            );
-        }
-
-
-        console.log("Map ready");
-    });
-}
-
-
-// ==================================================
 // WAIT FOR DASH
 // ==================================================
 
 const checkForMap =
-    setInterval(function () {
+    setInterval(
+        function () {
 
-        if (
-            document.getElementById(
-                "iss-map"
-            )
-        ) {
+            if (
+                document.getElementById(
+                    "iss-map"
+                )
+            ) {
 
-            clearInterval(
-                checkForMap
-            );
+                clearInterval(
+                    checkForMap
+                );
 
-            createMap();
-        }
+                createMap();
+            }
 
-    }, 100);
+        },
+        100
+    );
