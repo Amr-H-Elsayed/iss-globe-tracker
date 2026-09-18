@@ -17,6 +17,13 @@ The tracker retrieves the ISS's live position and visualizes it above a satellit
 * 💫 Draco-compressed GLB model support
 * ⚡ Real-time browser rendering with Three.js
 
+## 📷 Screenshots:
+<img width="1298" height="951" alt="image" src="https://github.com/user-attachments/assets/7b5e2beb-6d64-498c-9bc7-edba144343e7" />
+
+<img width="1093" height="872" alt="image" src="https://github.com/user-attachments/assets/7823f320-2e94-4feb-8246-d7d9e91951d5" />
+
+
+
 ## 🛠️ Tech Stack
 
 | Technology             | Purpose                                         |
